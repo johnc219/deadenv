@@ -31,7 +31,9 @@ Process results using `jq`
 deadenv --heroku app_name | jq '.[] | select(.matches == 0)'
 ```
 
-Identify ENV vars that are only found in one or more glob patterns
+Identify ENV vars that are only found in one or more glob patterns. Reduce `rg`
+filtering (`-uu`) so that dot files are searched and ignore files are not
+respected, but skip searching the log folder.
 ```bash
-deadenv --heroku app_name -t '.env*' -t 'app.json' -t 'spec/*/**' -- --hidden | jq '.[] | select(.matches_test_globs_only == true)'
+deadenv --heroku app_name -t '.env*' -t 'app.json' -t 'spec/*/**' -- -uu -g '!log/' | jq '.[] | select(.matches_test_globs_only == true)'
 ```
