@@ -1,0 +1,155 @@
+#!/usr/bin/env ruby
+
+# # Dependencies:
+#
+# ## Global
+# * [rg](https://github.com/BurntSushi/ripgrep)
+#
+# ## Heroku
+# * [heroku-cli](https://devcenter.heroku.com/articles/heroku-cli)
+
+require "json"
+require "optparse"
+
+class HerokuApp
+  attr_reader :name
+
+  def initialize(name)
+    @name = name
+  end
+
+  def env_vars
+    puts "Retrieving environment variables for Heroku App #{name}..."
+    JSON.parse(`heroku config --json --app #{name}`).keys.sort
+  end
+end
+
+class Rg
+  attr_reader :options
+  def initialize(options)
+    @options = options
+  end
+
+  def search(var)
+    raw = `#{search_cmd(var)}`
+    raw.split("\n").map { |line| JSON.parse(line) }
+  end
+
+  def search_cmd(var)
+    cmd = ["rg"]
+    cmd.concat(["-e", var])
+    cmd.concat(options)
+    cmd << "--json" # ensure output in json format
+    cmd.join(" ")
+  end
+end
+
+class Deadenv
+  attr_reader :app, :search_engine
+
+  def initialize(app, search_engine)
+    @app = app
+    @search_engine = search_engine
+  end
+
+  def analyze
+    vars = app.env_vars
+    total = vars.count
+
+    puts "Search cmd: #{search_engine.search_cmd("ENV_VAR")}"
+    puts "Searching environment variables..."
+    vars.map.with_index do |env_var, i|
+      fancy_progress(i + 1, total, env_var)
+      search_result = search_engine.search(env_var)
+      summary = search_result.find { |l| l["type"] == "summary" }
+      matches = summary["data"]["stats"]["matches"]
+      {env_var:, matches:}
+    end.tap { puts }
+  end
+
+  # More elaborate progress bar with optional message
+  def fancy_progress(current, total, message = nil)
+    percentage = ((current.to_f / total) * 100).round
+    bar_width = 30
+    filled = (bar_width * (current.to_f / total)).round
+    empty = bar_width - filled
+
+    bar = "=" * filled + " " * empty
+    # `\e[K` is an ANSI escape sequence that clars from the cursor position to the
+    # end of the line
+    output = "\r\e[K[#{bar}] #{percentage}% (#{current}/#{total})"
+    output += " - #{message}" if message
+
+    print output
+    $stdout.flush
+  end
+end
+
+class CLI
+  def self.parse(args)
+    options = {
+      json: false,
+      rg_args: []
+    }
+
+    parser = OptionParser.new do |opts|
+      opts.banner = "Usage: deadenv [options] -- [rg options]"
+      opts.separator ""
+
+      opts.on("--heroku NAME", String, "Heroku app name to use to fetch env vars") do |h|
+        options[:heroku] = h
+      end
+
+      opts.on("--json", "Output results in JSON format instead of CSV") do
+        options[:json] = true
+      end
+
+      opts.on("-h", "--help", "Show this message") do
+        puts opts
+        exit
+      end
+
+      # Add help section about rg passthrough
+      opts.separator "\nAny arguments after -- will be passed directly to rg"
+      opts.separator "Example: deadenv --json -- --hidden --glob '!spec/**' --glob '!app.json' --glob '!.env*'"
+    end
+
+    separator_index = args.index("--")
+
+    if separator_index
+      parser.parse(args[0...separator_index])
+      options[:rg_args] = args[separator_index + 1..]
+    else
+      parser.parse(args)
+    end
+
+    unless options.key?(:heroku)
+      puts parser
+      exit 1
+    end
+
+    options
+  end
+end
+
+def print_results(results, options)
+  sorted = results.sort_by { |r| [r[:matches], r[:env_var]] }
+
+  if options[:json]
+    puts JSON.pretty_generate(sorted)
+  else
+    puts "Env Var,Matches"
+    sorted.each { |s| puts "#{s[:env_var]},#{s[:matches]}" }
+  end
+end
+
+if __FILE__ == $PROGRAM_NAME
+  options = CLI.parse(ARGV)
+
+  app = HerokuApp.new(options[:heroku])
+  search_engine = Rg.new(options[:rg_args])
+
+  analyzer = Deadenv.new(app, search_engine)
+  results = analyzer.analyze
+  print_results(results, options)
+end
