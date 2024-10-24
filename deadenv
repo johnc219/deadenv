@@ -19,7 +19,7 @@ class HerokuApp
   end
 
   def env_vars
-    puts "Retrieving environment variables for Heroku App #{name}..."
+    warn "Retrieving environment variables for Heroku App #{name}..."
     JSON.parse(`heroku config --json --app #{name}`).keys.sort
   end
 end
@@ -45,26 +45,41 @@ class Rg
 end
 
 class Deadenv
-  attr_reader :app, :search_engine
+  attr_reader :app, :search_engine, :test_globs
 
-  def initialize(app, search_engine)
+  def initialize(app, search_engine, raw_test_globs)
     @app = app
     @search_engine = search_engine
+    @raw_test_globs = raw_test_globs
+    @test_globs = raw_test_globs.map { |g| Dir.glob(g) }
   end
 
   def analyze
     vars = app.env_vars
     total = vars.count
 
-    puts "Search cmd: #{search_engine.search_cmd("ENV_VAR")}"
-    puts "Searching environment variables..."
+    warn "Search cmd template: #{search_engine.search_cmd("ENV_VAR")}"
+    warn "Test globs: #{@raw_test_globs}"
+    warn "Searching environment variables..."
     vars.map.with_index do |env_var, i|
       fancy_progress(i + 1, total, env_var)
       search_result = search_engine.search(env_var)
       summary = search_result.find { |l| l["type"] == "summary" }
       matches = summary["data"]["stats"]["matches"]
-      {env_var:, matches:}
-    end.tap { puts }
+      paths = search_result.select { |l| l["type"] == "end" }.map { |l| l["data"]["path"]["text"] }
+
+      report = {env_var:, matches:, paths:}
+
+      unless test_globs.empty?
+        report[:matches_test_globs_only] = if matches.zero?
+          false
+        else
+          paths.all? { |p| test_globs.any? { |g| g.include?(p) } }
+        end
+      end
+
+      report
+    end.tap { warn }
   end
 
   # More elaborate progress bar with optional message
@@ -80,15 +95,17 @@ class Deadenv
     output = "\r\e[K[#{bar}] #{percentage}% (#{current}/#{total})"
     output += " - #{message}" if message
 
-    print output
-    $stdout.flush
+    $stderr.print output
+    $stderr.flush
   end
 end
 
 class CLI
   def self.parse(args)
     options = {
-      json: false,
+      json: true,
+      reverse: false,
+      test_globs: [],
       rg_args: []
     }
 
@@ -100,18 +117,26 @@ class CLI
         options[:heroku] = h
       end
 
-      opts.on("--json", "Output results in JSON format instead of CSV") do
+      opts.on("-t TG", "--test-glob TG", String, "Results will indicate whether the ENV var was only found within matching globs. Multiple globs can be given") do |g|
+        options[:test_globs] << g
+      end
+
+      opts.on("--json", "Output results in JSON format (the default)") do
         options[:json] = true
       end
 
+      opts.on("--reverse", "Print most matches first instead") do
+        options[:reverse] = true
+      end
+
       opts.on("-h", "--help", "Show this message") do
-        puts opts
+        warn opts
         exit
       end
 
       # Add help section about rg passthrough
       opts.separator "\nAny arguments after -- will be passed directly to rg"
-      opts.separator "Example: deadenv --json -- --hidden --glob '!spec/**' --glob '!app.json' --glob '!.env*'"
+      opts.separator "Example: deadenv --hidden --glob '!spec/**' --glob '!app.json' --glob '!.env*'"
     end
 
     separator_index = args.index("--")
@@ -124,7 +149,7 @@ class CLI
     end
 
     unless options.key?(:heroku)
-      puts parser
+      warn parser
       exit 1
     end
 
@@ -134,12 +159,10 @@ end
 
 def print_results(results, options)
   sorted = results.sort_by { |r| [r[:matches], r[:env_var]] }
+  sorted.reverse! if options[:reverse]
 
   if options[:json]
     puts JSON.pretty_generate(sorted)
-  else
-    puts "Env Var,Matches"
-    sorted.each { |s| puts "#{s[:env_var]},#{s[:matches]}" }
   end
 end
 
@@ -149,7 +172,7 @@ if __FILE__ == $PROGRAM_NAME
   app = HerokuApp.new(options[:heroku])
   search_engine = Rg.new(options[:rg_args])
 
-  analyzer = Deadenv.new(app, search_engine)
+  analyzer = Deadenv.new(app, search_engine, options[:test_globs])
   results = analyzer.analyze
   print_results(results, options)
 end
